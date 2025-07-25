@@ -1,0 +1,270 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, learning_curve
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.svm import SVR
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from tabulate import tabulate
+from scipy.stats import randint
+import warnings
+
+warnings.filterwarnings("ignore")
+
+
+
+
+np.random.seed(42)
+num_rows = 500
+dates = pd.date_range(start="2024-01-01", periods=num_rows, freq='D')
+house_sizes = np.random.randint(50, 500, size=num_rows)
+material_required = house_sizes * np.random.uniform(0.8, 1.2, size=num_rows)
+current_stock = np.random.randint(50, 200, size=num_rows)
+material_price = np.random.uniform(10, 100, size=num_rows).round(2)
+products = [f"Product_{i}" for i in range(1, num_rows + 1)]
+
+data = pd.DataFrame({
+    "Date": dates,
+    "House_Size": house_sizes,
+    "Material_Required": material_required.round(2),
+    "Current_Stock": current_stock,
+    "Material_Price": material_price,
+    "Product": products
+})
+
+
+data.to_csv("construction_material_sales121.csv", index=False)
+
+
+print("Dataset Loaded Successfully!\n")
+print(data.head())
+
+
+print("\nDataset Information:")
+print(data.info())
+print("\nSummary Statistics:")
+print(data.describe())
+
+
+print("\nMissing Values:")
+print(data.isnull().sum())
+
+
+numeric_cols = data.select_dtypes(include=[np.number]).columns
+data[numeric_cols] = data[numeric_cols].fillna(data[numeric_cols].median())
+
+
+data['Date'] = pd.to_datetime(data['Date'])
+data['Year'] = data['Date'].dt.year
+data['Month'] = data['Date'].dt.month
+data['Day'] = data['Date'].dt.day
+data['Quarter'] = data['Date'].dt.quarter
+data['DayOfWeek'] = data['Date'].dt.dayofweek
+data['House_Stock_Ratio'] = data['House_Size'] / data['Current_Stock']
+data['Material_Deficit'] = data['Material_Required'] - data['Current_Stock']
+data.drop(columns=['Date'], inplace=True)
+
+
+X = data.drop(columns=['Material_Required', 'Current_Stock', 'Product', 'Material_Price'])
+y = data['Material_Required']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+
+poly = PolynomialFeatures(degree=2, include_bias=False)
+X_train_poly = poly.fit_transform(X_train_scaled)
+X_test_poly = poly.transform(X_test_scaled)
+
+
+def evaluate_model(model, X_train, y_train, X_test, y_test):
+    print(f"Training {model.__class__.__name__}...")
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    mae = mean_absolute_error(y_test, y_pred)
+    accuracy = max(0, 100 * (1 - rmse / np.mean(y_test)))
+    print(f"{model.__class__.__name__} - R2: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, Accuracy: {accuracy:.2f}%")
+    return r2, rmse, mae, accuracy
+
+
+models = {
+    "Random Forest": RandomForestRegressor(n_estimators=100, random_state=42, verbose=0),
+    "Gradient Boosting": GradientBoostingRegressor(n_estimators=100, random_state=42, verbose=0),
+    "XGBoost": XGBRegressor(n_estimators=100, random_state=42, verbosity=0),
+    "LightGBM": LGBMRegressor(n_estimators=100, random_state=42, verbose=-1),
+    "SVR": SVR(kernel='rbf')
+}
+
+
+results = {}
+try:
+    for name, model in models.items():
+        r2, rmse, mae, accuracy = evaluate_model(model, X_train_poly, y_train, X_test_poly, y_test)
+        results[name] = {"R2 Score": r2, "RMSE": rmse, "MAE": mae, "Accuracy": accuracy}
+except KeyboardInterrupt:
+    print("Training interrupted by user.")
+
+
+print("\nModel Performance:")
+print(tabulate([(k, v['R2 Score'], v['RMSE'], v['MAE'], v['Accuracy']) for k, v in results.items()],
+               headers=["Model", "R2 Score", "RMSE", "MAE", "Accuracy"], tablefmt="pretty"))
+
+
+results_df = pd.DataFrame(results).T
+results_df.to_csv("model_results.csv", index=True)
+
+
+param_dist = {
+    'n_estimators': randint(50, 200),
+    'max_depth': randint(5, 20),
+    'min_samples_split': randint(2, 10)
+}
+
+random_search = RandomizedSearchCV(RandomForestRegressor(random_state=42), param_distributions=param_dist, n_iter=10, cv=3, scoring='r2', n_jobs=-1)
+random_search.fit(X_train_poly, y_train)
+
+
+best_model = random_search.best_estimator_
+y_pred_best = best_model.predict(X_test_poly)
+r2_best = r2_score(y_test, y_pred_best)
+print(f"\nBest Model R2 Score: {r2_best:.4f}")
+
+
+if hasattr(best_model, 'feature_importances_'):
+    feature_importance = best_model.feature_importances_
+    feature_names = poly.get_feature_names_out(X.columns)
+    importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': feature_importance})
+    importance_df = importance_df.sort_values(by='Importance', ascending=False)
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x='Importance', y='Feature', data=importance_df.head(10))
+    plt.title('Top 10 Feature Importances')
+    plt.show()
+
+
+def calculate_refill_quantity(current_stock, predicted_material_required, safety_stock=20):
+    return max(0, predicted_material_required - current_stock + safety_stock)
+
+X_test['Predicted_Material_Required'] = best_model.predict(X_test_poly)
+X_test['Current_Stock'] = data.loc[X_test.index, 'Current_Stock']
+X_test['Product'] = data.loc[X_test.index, 'Product']
+X_test['Material_Price'] = data.loc[X_test.index, 'Material_Price']
+X_test['Refill_Quantity'] = X_test.apply(lambda row: calculate_refill_quantity(row['Current_Stock'], row['Predicted_Material_Required']), axis=1)
+X_test['Total_Cost'] = X_test['Refill_Quantity'] * X_test['Material_Price']
+
+
+budget = 50000
+total_cost = X_test['Total_Cost'].sum()
+print(f"\nTotal Cost of Refill: ${total_cost:.2f}")
+print(f"Budget: ${budget:.2f}")
+if total_cost > budget:
+    print("Warning: Total cost exceeds the budget!")
+else:
+    print("Total cost is within the budget.")
+
+
+product_refill = X_test.groupby('Product')[['Refill_Quantity', 'Total_Cost']].sum().reset_index()
+product_refill.to_csv("refill_products_list.csv", index=False)
+
+
+def predict_for_budget(house_size, budget, model, scaler, poly, material_price):
+
+    input_data = pd.DataFrame({
+        'House_Size': [house_size],
+        'Year': [2024],
+        'Month': [1],
+        'Day': [1],
+        'Quarter': [1],
+        'DayOfWeek': [1],
+        'House_Stock_Ratio': [house_size / 100],
+        'Material_Deficit': [0]
+    })
+
+
+    input_scaled = scaler.transform(input_data)
+    input_poly = poly.transform(input_scaled)
+
+
+    predicted_material = model.predict(input_poly)[0]
+
+
+    total_cost = predicted_material * material_price
+
+
+    if total_cost <= budget:
+        status = "Within Budget"
+    else:
+        status = "Exceeds Budget"
+
+    return predicted_material, total_cost, status
+
+
+house_sizes_to_predict = [100, 200, 300, 400, 500]
+budget = 50000
+material_price = 50
+
+predictions = []
+for house_size in house_sizes_to_predict:
+    predicted_material, total_cost, status = predict_for_budget(house_size, budget, best_model, scaler, poly, material_price)
+    predictions.append({
+        'House_Size': house_size,
+        'Predicted_Material_Required': predicted_material,
+        'Total_Cost': total_cost,
+        'Budget_Status': status
+    })
+
+
+predictions_df = pd.DataFrame(predictions)
+predictions_df.to_csv("budget_predictions.csv", index=False)
+print("\nPredictions for Given Budget and House Sizes:")
+print(predictions_df)
+
+
+plt.figure(figsize=(12, 8))
+numeric_data = data.select_dtypes(include=[np.number])
+sns.heatmap(numeric_data.corr(), annot=True, cmap='coolwarm', fmt='.2f', linewidths=0.5)
+plt.title('Correlation Matrix')
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred_best, color='blue', alpha=0.6)
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+plt.xlabel('Actual Material Required')
+plt.ylabel('Predicted Material Required')
+plt.title('Predicted vs Actual Material Required')
+plt.show()
+
+plt.figure(figsize=(10, 6))
+sns.histplot(y_test - y_pred_best, bins=30, kde=True, color='purple')
+plt.xlabel('Residuals')
+plt.ylabel('Frequency')
+plt.title('Residuals Distribution')
+plt.show()
+
+
+plt.figure(figsize=(10, 6))
+plt.bar(['Total Cost', 'Budget'], [total_cost, budget], color=['red', 'green'])
+plt.title('Total Cost vs Budget')
+plt.ylabel('Amount ($)')
+plt.show()
+
+
+train_sizes, train_scores, test_scores = learning_curve(best_model, X_train_poly, y_train, cv=3, n_jobs=-1, train_sizes=np.linspace(0.1, 1.0, 5))
+
+plt.figure(figsize=(10, 6))
+plt.plot(train_sizes, np.mean(train_scores, axis=1), label='Training Score', color='blue')
+plt.plot(train_sizes, np.mean(test_scores, axis=1), label='Cross-validation Score', color='red')
+plt.xlabel('Training Set Size')
+plt.ylabel('Score')
+plt.title('Learning Curve')
+plt.legend()
+plt.show()
